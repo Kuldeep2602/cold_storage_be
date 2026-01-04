@@ -22,7 +22,7 @@ from django.urls import include, path
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/auth/', include('apps.users.auth_urls')),
-    path('api/users/', include('apps.users.urls')),
+    path('api/', include('apps.users.urls')),  # includes /api/users/, /api/staff/, /api/dashboard/
     path('api/inventory/', include('apps.inventory.urls')),
     path('api/ledger/', include('apps.ledger.urls')),
     path('api/temperature/', include('apps.temperature.urls')),

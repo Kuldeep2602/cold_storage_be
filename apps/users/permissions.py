@@ -51,3 +51,8 @@ class IsOperatorOrHigher(BasePermission):
         if user.role is None:  # Block unassigned users
             return False
         return getattr(user, 'role', None) in {'operator', 'manager', 'admin', 'owner'} or user.is_superuser
+
+
+# Alias for IsManagerOrAdmin
+IsManagerOrHigher = IsManagerOrAdmin
+

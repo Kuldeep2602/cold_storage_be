@@ -1,0 +1,52 @@
+# render.yaml - Render Blueprint for Cold Storage ERP Backend
+# See: https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: cold-storage-api
+    runtime: python
+    region: singapore  # Change to your preferred region
+    plan: free
+    buildCommand: ./build.sh
+    startCommand: gunicorn config.wsgi:application
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+      - key: DJANGO_DEBUG
+        value: false
+      - key: DJANGO_ALLOWED_HOSTS
+        value: ".onrender.com,localhost"
+      - key: CORS_ALLOW_ALL_ORIGINS
+        value: true
+      - key: OTP_DEBUG_RETURN_CODE
+        value: true  # Set to false in production
+      # Database - use Render PostgreSQL or external DB
+      - key: DB_NAME
+        fromDatabase:
+          name: cold-storage-db
+          property: database
+      - key: DB_USER
+        fromDatabase:
+          name: cold-storage-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: cold-storage-db
+          property: password
+      - key: DB_HOST
+        fromDatabase:
+          name: cold-storage-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: cold-storage-db
+          property: port
+      - key: DB_SSLMODE
+        value: require
+
+databases:
+  - name: cold-storage-db
+    plan: free
+    region: singapore  # Match your web service region

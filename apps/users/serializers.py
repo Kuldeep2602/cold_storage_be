@@ -24,6 +24,52 @@ class CreateUserSerializer(serializers.ModelSerializer):
         return value
 
 
+class StaffMemberSerializer(serializers.ModelSerializer):
+    """Serializer for staff management with role display"""
+    role_display = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = User
+        fields = ['id', 'phone_number', 'name', 'preferred_language', 'role', 'role_display', 'is_active', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+    def get_role_display(self, obj):
+        role_labels = {
+            'operator': 'Inward/Outward Operator',
+            'technician': 'Technician (Temperature)',
+            'manager': 'Manager',
+            'admin': 'Admin',
+            'owner': 'Owner',
+        }
+        return role_labels.get(obj.role, obj.role or 'No Role')
+
+
+class CreateStaffSerializer(serializers.ModelSerializer):
+    """Serializer for creating new staff members"""
+    class Meta:
+        model = User
+        fields = ['phone_number', 'name', 'role']
+
+    def validate_phone_number(self, value):
+        phone = str(value).strip()
+        if User.objects.filter(phone_number=phone).exists():
+            raise serializers.ValidationError('Phone number already registered')
+        return phone
+
+    def validate_role(self, value):
+        allowed_roles = ['operator', 'technician', 'manager']
+        if value not in allowed_roles:
+            raise serializers.ValidationError(f'Role must be one of: {", ".join(allowed_roles)}')
+        return value
+
+    def create(self, validated_data):
+        return User.objects.create_user(
+            phone_number=validated_data['phone_number'],
+            name=validated_data.get('name', ''),
+            role=validated_data['role'],
+        )
+
+
 class SignupSerializer(serializers.ModelSerializer):
 	class Meta:
 		model = User

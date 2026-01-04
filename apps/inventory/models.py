@@ -7,6 +7,57 @@ from django.db import models
 from django.db.models import Sum
 
 
+class ColdStorage(models.Model):
+    """Represents a cold storage facility that an owner can manage"""
+    name = models.CharField(max_length=255)
+    code = models.CharField(max_length=50, unique=True, help_text="Unique code for the cold storage")
+    address = models.TextField(blank=True)
+    city = models.CharField(max_length=100, blank=True)
+    state = models.CharField(max_length=100, blank=True)
+    
+    # Capacity
+    total_capacity = models.DecimalField(max_digits=12, decimal_places=2, default=500, help_text="Total capacity in MT")
+    
+    # Owner and Manager
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, 
+        on_delete=models.PROTECT, 
+        related_name='owned_cold_storages'
+    )
+    manager = models.ForeignKey(
+        settings.AUTH_USER_MODEL, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='managed_cold_storages'
+    )
+    
+    # Contact info
+    contact_phone = models.CharField(max_length=20, blank=True)
+    contact_email = models.EmailField(blank=True)
+    
+    # Status
+    is_active = models.BooleanField(default=True)
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+        verbose_name = 'Cold Storage'
+        verbose_name_plural = 'Cold Storages'
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.code})"
+
+    @property
+    def display_name(self) -> str:
+        if self.city:
+            return f"{self.name} {self.city}"
+        return self.name
+
+
 class PersonType(models.TextChoices):
 	FARMER = 'farmer', 'Farmer'
 	VENDOR = 'vendor', 'Vendor'
@@ -50,6 +101,7 @@ def inward_image_upload_to(instance: 'InwardEntry', filename: str) -> str:
 
 class InwardEntry(models.Model):
 	person = models.ForeignKey(Person, on_delete=models.PROTECT, related_name='inward_entries')
+	cold_storage = models.ForeignKey(ColdStorage, on_delete=models.PROTECT, related_name='inward_entries', null=True, blank=True)
 
 	crop_name = models.CharField(max_length=100)
 	crop_variety = models.CharField(max_length=100, blank=True)
