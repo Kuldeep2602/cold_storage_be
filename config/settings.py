@@ -28,6 +28,10 @@ DEBUG = config('DJANGO_DEBUG', default=True, cast=bool)
 
 ALLOWED_HOSTS = config('DJANGO_ALLOWED_HOSTS', default='*', cast=Csv())
 
+# Automatically allow Render domains if running on Render
+if config('RENDER', default=False, cast=bool):
+    ALLOWED_HOSTS = list(ALLOWED_HOSTS) + ['.onrender.com']
+
 
 # Application definition
 
