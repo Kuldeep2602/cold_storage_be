@@ -8,7 +8,7 @@ from .models import PhoneOTP, User, UserRole
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ['id', 'phone_number', 'name', 'preferred_language', 'role', 'is_active', 'created_at']
+        fields = ['id', 'phone_number', 'name', 'preferred_language', 'role', 'assigned_storages', 'is_active', 'created_at']
         read_only_fields = ['id', 'created_at']
 
 
@@ -30,7 +30,7 @@ class StaffMemberSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = User
-        fields = ['id', 'phone_number', 'name', 'preferred_language', 'role', 'role_display', 'is_active', 'created_at']
+        fields = ['id', 'phone_number', 'name', 'preferred_language', 'role', 'role_display', 'assigned_storages', 'is_active', 'created_at']
         read_only_fields = ['id', 'created_at']
 
     def get_role_display(self, obj):
@@ -46,9 +46,13 @@ class StaffMemberSerializer(serializers.ModelSerializer):
 
 class CreateStaffSerializer(serializers.ModelSerializer):
     """Serializer for creating new staff members"""
+    assigned_storages = serializers.ListField(
+        child=serializers.IntegerField(), required=False, write_only=True
+    )
+
     class Meta:
         model = User
-        fields = ['phone_number', 'name', 'role']
+        fields = ['phone_number', 'name', 'role', 'assigned_storages']
 
     def validate_phone_number(self, value):
         phone = str(value).strip()
@@ -63,11 +67,20 @@ class CreateStaffSerializer(serializers.ModelSerializer):
         return value
 
     def create(self, validated_data):
-        return User.objects.create_user(
+        # Extract fields that might be passed via save() or request data
+        managed_by = validated_data.get('managed_by')
+        
+        user = User.objects.create_user(
             phone_number=validated_data['phone_number'],
             name=validated_data.get('name', ''),
             role=validated_data['role'],
+            managed_by=managed_by, # Pass explicitly
         )
+        
+        if 'assigned_storages' in validated_data:
+            user.assigned_storages.set(validated_data['assigned_storages'])
+        
+        return user
 
 
 class SignupSerializer(serializers.ModelSerializer):
@@ -84,6 +97,12 @@ class SignupSerializer(serializers.ModelSerializer):
 	def validate_role(self, value):
 		if value and value not in UserRole.values:
 			raise serializers.ValidationError('Invalid role')
+		
+		# Restrict signup for staff roles
+		restricted_roles = ['manager', 'operator', 'technician']
+		if value in restricted_roles:
+			raise serializers.ValidationError(f'Direct signup not allowed for {value}. Please contact your administrator.')
+			
 		return value
 
 	def create(self, validated_data):
@@ -97,6 +116,7 @@ class SignupSerializer(serializers.ModelSerializer):
 
 class OTPRequestSerializer(serializers.Serializer):
     phone_number = serializers.CharField(max_length=20)
+    role = serializers.ChoiceField(choices=UserRole.choices, required=False)
 
 
 class OTPVerifySerializer(serializers.Serializer):

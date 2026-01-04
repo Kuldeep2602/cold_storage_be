@@ -66,6 +66,12 @@ class User(AbstractBaseUser, PermissionsMixin):
 		default=PreferredLanguage.ENGLISH
 	)
 	role = models.CharField(max_length=20, choices=UserRole.choices, null=True, blank=True)
+	
+	# Hierarchy: Who created/manages this user
+	managed_by = models.ForeignKey('self', null=True, blank=True, on_delete=models.SET_NULL, related_name='staff_members')
+	
+	# RBAC: Which cold storages this user can access (for Managers/Operators)
+	assigned_storages = models.ManyToManyField('inventory.ColdStorage', blank=True, related_name='assigned_users')
 
 	is_active = models.BooleanField(default=True)
 	is_staff = models.BooleanField(default=False)

@@ -118,7 +118,7 @@ class InwardEntry(models.Model):
 	expected_storage_duration_days = models.PositiveIntegerField(null=True, blank=True)
 	entry_date = models.DateField(auto_now_add=True)
 
-	created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='created_inwards')
+	created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_inwards')
 	created_at = models.DateTimeField(auto_now_add=True)
 
 	def __str__(self) -> str:
