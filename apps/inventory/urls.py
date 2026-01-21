@@ -6,6 +6,7 @@ from .views import (
     InwardEntryViewSet, 
     OutwardEntryViewSet, 
     PersonViewSet,
+    StorageRoomViewSet,
     OwnerDashboardView,
     ManagerDashboardView
 )
@@ -15,9 +16,9 @@ router.register(r'cold-storages', ColdStorageViewSet, basename='cold-storages')
 router.register(r'persons', PersonViewSet, basename='persons')
 router.register(r'inwards', InwardEntryViewSet, basename='inwards')
 router.register(r'outwards', OutwardEntryViewSet, basename='outwards')
+router.register(r'rooms', StorageRoomViewSet, basename='rooms')
 
 urlpatterns = router.urls + [
     path('owner-dashboard/', OwnerDashboardView.as_view(), name='owner-dashboard'),
     path('manager-dashboard/', ManagerDashboardView.as_view(), name='manager-dashboard'),
 ]
-

@@ -1,44 +1,34 @@
 from rest_framework import serializers
-from .models import StorageRoom, TemperatureLog, TemperatureAlert
-
-
-class StorageRoomSerializer(serializers.ModelSerializer):
-    is_within_range = serializers.ReadOnlyField()
-    temperature_status = serializers.ReadOnlyField()
-    
-    class Meta:
-        model = StorageRoom
-        fields = [
-            'id', 'name', 'min_temperature', 'max_temperature', 
-            'current_temperature', 'is_active', 'is_within_range',
-            'temperature_status', 'created_at', 'updated_at'
-        ]
+from apps.inventory.models import StorageRoom
+from .models import TemperatureLog, TemperatureAlert
 
 
 class TemperatureLogSerializer(serializers.ModelSerializer):
-    room_name = serializers.CharField(source='room.name', read_only=True)
-    created_by_name = serializers.CharField(source='created_by.name', read_only=True)
+    room_name = serializers.CharField(source='room.room_name', read_only=True)
+    cold_storage_name = serializers.CharField(source='room.cold_storage.name', read_only=True)
+    created_by_name = serializers.CharField(source='created_by.name', read_only=True, allow_null=True)
 
     class Meta:
         model = TemperatureLog
         fields = [
-            'id', 'room', 'room_name', 'logged_at', 'temperature',
+            'id', 'room', 'room_name', 'cold_storage_name', 'logged_at', 'temperature',
             'created_by', 'created_by_name', 'created_at'
         ]
         read_only_fields = ['created_by']
 
 
 class TemperatureAlertSerializer(serializers.ModelSerializer):
-    room_name = serializers.CharField(source='room.name', read_only=True)
+    room_name = serializers.CharField(source='room.room_name', read_only=True)
+    cold_storage_name = serializers.CharField(source='room.cold_storage.name', read_only=True)
     room_min_temp = serializers.DecimalField(source='room.min_temperature', read_only=True, max_digits=5, decimal_places=2)
     room_max_temp = serializers.DecimalField(source='room.max_temperature', read_only=True, max_digits=5, decimal_places=2)
-    acknowledged_by_name = serializers.CharField(source='acknowledged_by.name', read_only=True)
+    acknowledged_by_name = serializers.CharField(source='acknowledged_by.name', read_only=True, allow_null=True)
     time_ago = serializers.SerializerMethodField()
 
     class Meta:
         model = TemperatureAlert
         fields = [
-            'id', 'room', 'room_name', 'room_min_temp', 'room_max_temp',
+            'id', 'room', 'room_name', 'cold_storage_name', 'room_min_temp', 'room_max_temp',
             'temperature', 'severity', 'status', 'message',
             'acknowledged_by', 'acknowledged_by_name', 'acknowledged_at',
             'resolved_at', 'action_taken', 'time_ago', 'created_at'

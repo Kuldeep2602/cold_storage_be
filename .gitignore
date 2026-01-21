@@ -1,2 +1,29 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+myenv/
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+
+# Environment variables
 .env
-.env.example
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

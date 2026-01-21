@@ -12,14 +12,15 @@ from rest_framework.views import APIView
 
 from apps.users.permissions import IsOperatorOrHigher, IsAdminOrOwner
 
-from .models import ColdStorage, InwardEntry, OutwardEntry, Person
+from .models import ColdStorage, InwardEntry, OutwardEntry, Person, StorageRoom
 from .serializers import (
     ColdStorageSerializer, 
     ColdStorageCreateSerializer,
     ColdStorageSummarySerializer,
     InwardEntrySerializer, 
     OutwardEntrySerializer, 
-    PersonSerializer
+    PersonSerializer,
+    StorageRoomSerializer
 )
 
 
@@ -30,22 +31,58 @@ class PersonViewSet(viewsets.ModelViewSet):
 	http_method_names = ['get', 'post']
 
 	def get_queryset(self):
+		user = self.request.user
 		qs = super().get_queryset()
+		
+		# Filter persons based on user role and hierarchy
+		if user.role == 'owner':
+			# Owner sees persons created by them or their staff
+			staff_ids = list(user.staff_members.values_list('id', flat=True))
+			qs = qs.filter(Q(created_by=user) | Q(created_by__in=staff_ids))
+		elif user.role == 'manager':
+			# Manager sees persons created by them or their staff
+			staff_ids = list(user.staff_members.values_list('id', flat=True))
+			qs = qs.filter(Q(created_by=user) | Q(created_by__in=staff_ids))
+		elif user.role in ['operator', 'technician']:
+			# Operators see persons created by them or their manager's hierarchy
+			if user.managed_by:
+				manager = user.managed_by
+				staff_ids = list(manager.staff_members.values_list('id', flat=True))
+				qs = qs.filter(Q(created_by=user) | Q(created_by=manager) | Q(created_by__in=staff_ids))
+			else:
+				qs = qs.filter(created_by=user)
+		
 		search = self.request.query_params.get('search', '').strip()
 		
 		if search:
 			# Search by name or mobile number
-			from django.db.models import Q
 			qs = qs.filter(Q(name__icontains=search) | Q(mobile_number__icontains=search))
 		
 		return qs
+
+	def perform_create(self, serializer):
+		user = self.request.user
+		cold_storage = serializer.validated_data.get('cold_storage')
+		
+		# Auto-assign cold storage if not provided
+		if not cold_storage:
+			# For operators/managers, use their first assigned storage
+			if user.role in ['operator', 'manager', 'technician']:
+				cold_storage = user.assigned_storages.first()
+			# For owners, use their first owned storage
+			elif user.role == 'owner':
+				cold_storage = user.owned_cold_storages.first()
+		
+		# Set created_by and cold_storage
+		serializer.save(created_by=user, cold_storage=cold_storage)
 
 	@action(detail=False, methods=['get'], url_path='by-mobile')
 	def by_mobile(self, request):
 		mobile = (request.query_params.get('mobile_number') or request.query_params.get('mobile') or '').strip()
 		if not mobile:
 			return Response({'detail': 'mobile_number is required'}, status=status.HTTP_400_BAD_REQUEST)
-		person = Person.objects.filter(mobile_number=mobile).first()
+		# Search within user's accessible persons
+		person = self.get_queryset().filter(mobile_number=mobile).first()
 		if not person:
 			return Response({'detail': 'Person not found'}, status=status.HTTP_404_NOT_FOUND)
 		return Response(self.get_serializer(person).data)
@@ -58,11 +95,22 @@ class ColdStorageViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
+        qs = ColdStorage.objects.select_related('manager', 'owner')
+        
         # Owners see only their cold storages
         if user.role == 'owner':
-            return ColdStorage.objects.filter(owner=user)
+            return qs.filter(owner=user)
+        
+        # Managers see cold storages assigned to them
+        if user.role == 'manager':
+            return qs.filter(Q(manager=user) | Q(assigned_users=user)).distinct()
+        
+        # Operators/Technicians see their assigned storages
+        if user.role in ['operator', 'technician']:
+            return qs.filter(assigned_users=user)
+        
         # Admins see all
-        return ColdStorage.objects.all()
+        return qs.all()
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -84,11 +132,17 @@ class ColdStorageViewSet(viewsets.ModelViewSet):
         cold_storage = self.get_object()
         manager_id = request.data.get('manager_id')
         
+        # Remove old manager from assigned_storages if exists
+        if cold_storage.manager:
+            cold_storage.manager.assigned_storages.remove(cold_storage)
+        
         if manager_id:
             from apps.users.models import User
             try:
                 manager = User.objects.get(id=manager_id, role='manager', is_active=True)
                 cold_storage.manager = manager
+                # Also add to assigned_storages M2M
+                manager.assigned_storages.add(cold_storage)
             except User.DoesNotExist:
                 return Response(
                     {'detail': 'Manager not found or not a valid manager'}, 
@@ -499,3 +553,24 @@ class ManagerDashboardView(APIView):
             },
             'active_bookings': active_bookings,
         }
+
+
+class StorageRoomViewSet(viewsets.ModelViewSet):
+    queryset = StorageRoom.objects.all()
+    serializer_class = StorageRoomSerializer
+    permission_classes = [IsAuthenticated]
+    http_method_names = ['get', 'patch']
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset()
+        
+        # Filter rooms based on user's assigned storages
+        if user.role in ['technician', 'operator', 'manager']:
+            assigned_storage_ids = user.assigned_storages.values_list('id', flat=True)
+            qs = qs.filter(cold_storage_id__in=assigned_storage_ids)
+        elif user.role == 'owner':
+            qs = qs.filter(cold_storage__owner=user)
+        
+        return qs
+

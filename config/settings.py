@@ -27,6 +27,9 @@ SECRET_KEY = config('DJANGO_SECRET_KEY', default='unsafe-dev-secret-key')
 DEBUG = config('DJANGO_DEBUG', default=True, cast=bool)
 
 ALLOWED_HOSTS = config('DJANGO_ALLOWED_HOSTS', default='*', cast=Csv())
+if DEBUG:
+    ALLOWED_HOSTS = list(ALLOWED_HOSTS) + ['127.0.0.1', 'localhost']
+
 
 # Automatically allow Render domains if running on Render
 if config('RENDER', default=False, cast=bool):

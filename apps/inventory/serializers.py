@@ -1,14 +1,22 @@
 from rest_framework import serializers
 from django.db.models import Sum
 
-from .models import ColdStorage, InwardEntry, OutwardEntry, Person
+from .models import ColdStorage, InwardEntry, OutwardEntry, Person, StorageRoom
 
 
 class PersonSerializer(serializers.ModelSerializer):
+    cold_storage_name = serializers.CharField(source='cold_storage.name', read_only=True, allow_null=True)
+    
     class Meta:
         model = Person
-        fields = ['id', 'person_type', 'name', 'mobile_number', 'address', 'created_at']
-        read_only_fields = ['id', 'created_at']
+        fields = ['id', 'person_type', 'name', 'mobile_number', 'address', 'cold_storage', 'cold_storage_name', 'created_at']
+        read_only_fields = ['id', 'created_at', 'cold_storage_name']
+
+
+class StorageRoomSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = StorageRoom
+        fields = ['id', 'room_name', 'capacity', 'description']
 
 
 class ColdStorageSerializer(serializers.ModelSerializer):
@@ -18,15 +26,16 @@ class ColdStorageSerializer(serializers.ModelSerializer):
     occupied_capacity = serializers.SerializerMethodField()
     available_capacity = serializers.SerializerMethodField()
     utilization_percent = serializers.SerializerMethodField()
+    rooms = StorageRoomSerializer(many=True, read_only=True)
 
     class Meta:
         model = ColdStorage
         fields = [
-            'id', 'name', 'code', 'display_name', 'address', 'city', 'state',
+            'id', 'name', 'code', 'storage_type', 'display_name', 'address', 'city', 'state',
             'total_capacity', 'occupied_capacity', 'available_capacity', 'utilization_percent',
             'owner', 'owner_name', 'manager', 'manager_name',
             'contact_phone', 'contact_email', 'is_active',
-            'created_at', 'updated_at'
+            'created_at', 'updated_at', 'rooms'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
@@ -54,23 +63,35 @@ class ColdStorageSerializer(serializers.ModelSerializer):
 
 
 class ColdStorageCreateSerializer(serializers.ModelSerializer):
+    initial_rooms = serializers.ListField(child=serializers.CharField(), required=False, write_only=True)
+
     class Meta:
         model = ColdStorage
-        fields = ['name', 'code', 'address', 'city', 'state', 'total_capacity', 
-                  'manager', 'contact_phone', 'contact_email']
+        fields = ['name', 'code', 'storage_type', 'address', 'city', 'state', 'total_capacity', 
+                  'manager', 'contact_phone', 'contact_email', 'initial_rooms']
 
     def create(self, validated_data):
         validated_data['owner'] = self.context['request'].user
-        return super().create(validated_data)
+        initial_rooms = validated_data.pop('initial_rooms', [])
+        
+        instance = super().create(validated_data)
+        
+        # Create initial rooms
+        if initial_rooms:
+            rooms = [StorageRoom(cold_storage=instance, room_name=name.strip()) for name in initial_rooms if name.strip()]
+            StorageRoom.objects.bulk_create(rooms)
+            
+        return instance
 
 
 class ColdStorageSummarySerializer(serializers.ModelSerializer):
     """Lightweight serializer for dropdown lists"""
     display_name = serializers.CharField(read_only=True)
+    rooms = StorageRoomSerializer(many=True, read_only=True)
 
     class Meta:
         model = ColdStorage
-        fields = ['id', 'name', 'code', 'display_name', 'city']
+        fields = ['id', 'name', 'code', 'display_name', 'city', 'rooms']
 
 
 class InwardEntrySerializer(serializers.ModelSerializer):

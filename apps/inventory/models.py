@@ -7,13 +7,30 @@ from django.db import models
 from django.db.models import Sum
 
 
+
+class StorageType(models.TextChoices):
+    SILO = 'silo', 'Silos'
+    WAREHOUSE = 'warehouse', 'Warehouse'
+    COLD_STORAGE = 'cold_storage', 'Cold Storage'
+    FROZEN_STORAGE = 'frozen_storage', 'Frozen Storage'
+    RIPENING_CHAMBER = 'ripening_chamber', 'Ripening Chamber'
+    CONTROLLED_ATMOSPHERE = 'controlled_atmosphere', 'Controlled Atmosphere Storage'
+
+
 class ColdStorage(models.Model):
-    """Represents a cold storage facility that an owner can manage"""
+    """Represents a storage facility (generic) that an owner can manage"""
     name = models.CharField(max_length=255)
-    code = models.CharField(max_length=50, unique=True, help_text="Unique code for the cold storage")
+    code = models.CharField(max_length=50, help_text="Code for the storage (unique per owner)")
     address = models.TextField(blank=True)
     city = models.CharField(max_length=100, blank=True)
     state = models.CharField(max_length=100, blank=True)
+    
+    # Type of storage
+    storage_type = models.CharField(
+        max_length=50, 
+        choices=StorageType.choices, 
+        default=StorageType.COLD_STORAGE
+    )
     
     # Capacity
     total_capacity = models.DecimalField(max_digits=12, decimal_places=2, default=500, help_text="Total capacity in MT")
@@ -45,8 +62,10 @@ class ColdStorage(models.Model):
 
     class Meta:
         ordering = ['name']
-        verbose_name = 'Cold Storage'
-        verbose_name_plural = 'Cold Storages'
+        verbose_name = 'Storage'
+        verbose_name_plural = 'Storages'
+        # Code must be unique per owner, not globally
+        unique_together = [['owner', 'code']]
 
     def __str__(self) -> str:
         return f"{self.name} ({self.code})"
@@ -56,6 +75,71 @@ class ColdStorage(models.Model):
         if self.city:
             return f"{self.name} {self.city}"
         return self.name
+
+
+class StorageRoom(models.Model):
+    cold_storage = models.ForeignKey(ColdStorage, on_delete=models.CASCADE, related_name='rooms')
+    room_name = models.CharField(max_length=100)
+    capacity = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True, help_text="Capacity in MT")
+    description = models.TextField(blank=True)
+    
+    # Temperature settings for monitoring
+    min_temperature = models.DecimalField(
+        max_digits=5, 
+        decimal_places=2, 
+        default=-5.00,
+        help_text="Minimum acceptable temperature in °C"
+    )
+    max_temperature = models.DecimalField(
+        max_digits=5, 
+        decimal_places=2, 
+        default=0.00,
+        help_text="Maximum acceptable temperature in °C"
+    )
+    current_temperature = models.DecimalField(
+        max_digits=5, 
+        decimal_places=2, 
+        null=True, 
+        blank=True,
+        help_text="Last recorded temperature in °C"
+    )
+    last_temp_update = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ['cold_storage', 'room_name']
+        ordering = ['room_name']
+    
+    @property
+    def is_within_range(self) -> bool:
+        if self.current_temperature is None or self.min_temperature is None or self.max_temperature is None:
+            return True
+        return self.min_temperature <= self.current_temperature <= self.max_temperature
+    
+    @property
+    def temperature_status(self) -> str:
+        """Returns: 'unknown', 'normal', 'warning', 'critical'"""
+        if self.current_temperature is None or self.min_temperature is None or self.max_temperature is None:
+            return 'unknown'
+        if self.is_within_range:
+            return 'normal'
+        # Calculate deviation - convert to float to avoid Decimal/float type errors
+        current = float(self.current_temperature)
+        min_temp = float(self.min_temperature)
+        max_temp = float(self.max_temperature)
+        
+        if current < min_temp:
+            deviation = min_temp - current
+        else:
+            deviation = current - max_temp
+        
+        if deviation > 5:
+            return 'critical'
+        return 'warning'
+
+    def __str__(self):
+        return f"{self.room_name} - {self.cold_storage.name}"
 
 
 class PersonType(models.TextChoices):
@@ -87,6 +171,25 @@ class Person(models.Model):
 	name = models.CharField(max_length=255)
 	mobile_number = models.CharField(max_length=20, unique=True)
 	address = models.TextField(blank=True)
+	
+	# Track who added this person
+	created_by = models.ForeignKey(
+		settings.AUTH_USER_MODEL,
+		on_delete=models.SET_NULL,
+		null=True,
+		blank=True,
+		related_name='created_persons'
+	)
+	
+	# Associate person with a cold storage
+	cold_storage = models.ForeignKey(
+		'ColdStorage',
+		on_delete=models.SET_NULL,
+		null=True,
+		blank=True,
+		related_name='persons',
+		help_text='Cold storage where this person does business'
+	)
 
 	created_at = models.DateTimeField(auto_now_add=True)
 	updated_at = models.DateTimeField(auto_now=True)
