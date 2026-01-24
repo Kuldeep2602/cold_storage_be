@@ -7,10 +7,11 @@ from .models import PhoneOTP, User, UserRole
 
 class UserSerializer(serializers.ModelSerializer):
     assigned_storages = serializers.SerializerMethodField()
+    assigned_rooms = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ['id', 'phone_number', 'name', 'role', 'is_active', 'created_at', 'assigned_storages']
+        fields = ['id', 'phone_number', 'name', 'role', 'is_active', 'created_at', 'assigned_storages', 'assigned_rooms']
         read_only_fields = ['id', 'created_at']
 
     def get_assigned_storages(self, obj):
@@ -27,6 +28,11 @@ class UserSerializer(serializers.ModelSerializer):
         
         # Use distinct to avoid duplicates if user is both assigned and owner (rare but possible)
         return ColdStorageSummarySerializer(assigned.distinct(), many=True).data
+    
+    def get_assigned_rooms(self, obj):
+        from apps.inventory.serializers import StorageRoomSerializer
+        rooms = obj.assigned_rooms.all()
+        return StorageRoomSerializer(rooms, many=True).data
 
 
 class CreateUserSerializer(serializers.ModelSerializer):
@@ -40,6 +46,20 @@ class CreateUserSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('Invalid role')
         return value
 
+    def validate(self, attrs):
+        # Check if phone number already exists under the same manager
+        phone_number = attrs.get('phone_number')
+        if phone_number:
+            request = self.context.get('request')
+            if request and request.user:
+                managed_by = request.user
+                # Check for duplicate phone within same manager's scope
+                if User.objects.filter(phone_number=phone_number, managed_by=managed_by).exists():
+                    raise serializers.ValidationError({
+                        'phone_number': 'This phone number is already registered under your account'
+                    })
+        return attrs
+
 
 class SignupSerializer(serializers.ModelSerializer):
     class Meta:
@@ -48,8 +68,9 @@ class SignupSerializer(serializers.ModelSerializer):
 
     def validate_phone_number(self, value):
         phone = str(value).strip()
-        if User.objects.filter(phone_number=phone).exists():
-            raise serializers.ValidationError('Phone number already registered')
+        # Only check for owners (who self-register, so managed_by=None)
+        if User.objects.filter(phone_number=phone, managed_by__isnull=True).exists():
+            raise serializers.ValidationError('Phone number already registered as owner')
         return phone
 
     def create(self, validated_data):

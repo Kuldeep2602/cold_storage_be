@@ -14,9 +14,15 @@ class PersonSerializer(serializers.ModelSerializer):
 
 
 class StorageRoomSerializer(serializers.ModelSerializer):
+    cold_storage_name = serializers.CharField(source='cold_storage.display_name', read_only=True)
+    
     class Meta:
         model = StorageRoom
-        fields = ['id', 'room_name', 'capacity', 'description']
+        fields = [
+            'id', 'cold_storage', 'cold_storage_name', 'room_name', 'capacity', 'description',
+            'min_temperature', 'max_temperature', 'current_temperature', 'last_temp_update'
+        ]
+        read_only_fields = ['id', 'cold_storage_name', 'last_temp_update']
 
 
 class ColdStorageSerializer(serializers.ModelSerializer):

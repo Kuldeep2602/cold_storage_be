@@ -247,7 +247,7 @@ class OutwardEntry(models.Model):
 	payment_status = models.CharField(max_length=20, choices=PaymentStatus.choices, default=PaymentStatus.PENDING)
 	payment_method = models.CharField(max_length=20, choices=PaymentMethod.choices, blank=True)
 
-	created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name='created_outwards')
+	created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_outwards')
 	created_at = models.DateTimeField(auto_now_add=True)
 
 	def save(self, *args, **kwargs):

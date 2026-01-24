@@ -68,6 +68,12 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
+# Custom authentication backend to allow same phone number under different owners
+AUTHENTICATION_BACKENDS = [
+    'apps.users.auth_backends.PhoneNumberRoleBackend',
+    'django.contrib.auth.backends.ModelBackend',  # Fallback for superuser
+]
+
 ROOT_URLCONF = 'config.urls'
 
 TEMPLATES = [
@@ -166,6 +172,8 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
     ),
+    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'PAGE_SIZE': 20,  # Default page size - returns 20 items per page
 }
 
 SIMPLE_JWT = {
@@ -176,6 +184,20 @@ SIMPLE_JWT = {
 CORS_ALLOW_ALL_ORIGINS = config('CORS_ALLOW_ALL_ORIGINS', default=DEBUG, cast=bool)
 if not CORS_ALLOW_ALL_ORIGINS:
     CORS_ALLOWED_ORIGINS = config('CORS_ALLOWED_ORIGINS', default='', cast=Csv())
+
+# Additional CORS settings for proper API access
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+]
 
 OTP_TTL_SECONDS = config('OTP_TTL_SECONDS', default=300, cast=int)
 OTP_DEBUG_RETURN_CODE = config('OTP_DEBUG_RETURN_CODE', default=DEBUG, cast=bool)

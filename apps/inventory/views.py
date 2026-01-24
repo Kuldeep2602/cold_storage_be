@@ -10,7 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.users.permissions import IsOperatorOrHigher, IsAdminOrOwner
+from apps.users.permissions import IsOperatorOrHigher, IsAdminOrOwner, IsManagerOrAdmin
 
 from .models import ColdStorage, InwardEntry, OutwardEntry, Person, StorageRoom
 from .serializers import (
@@ -91,7 +91,13 @@ class PersonViewSet(viewsets.ModelViewSet):
 class ColdStorageViewSet(viewsets.ModelViewSet):
     """ViewSet for managing cold storages (Owner only)"""
     serializer_class = ColdStorageSerializer
-    permission_classes = [IsAdminOrOwner]
+    permission_classes = [IsManagerOrAdmin]
+
+    def get_permissions(self):
+        """Managers can only view (GET), owners can create/update/delete"""
+        if self.action in ['create', 'update', 'partial_update', 'destroy', 'assign_manager']:
+            return [IsAdminOrOwner()]
+        return [IsManagerOrAdmin()]
 
     def get_queryset(self):
         user = self.request.user

@@ -44,8 +44,19 @@ class RequestOTPView(APIView):
 		serializer = OTPRequestSerializer(data=request.data)
 		serializer.is_valid(raise_exception=True)
 		phone_number = serializer.validated_data['phone_number'].strip()
+		
+		# Accept optional role parameter to help identify the correct user
+		# If multiple users exist with same phone, role helps narrow it down
+		role = request.data.get('role', '').strip().lower()
 
-		user = User.objects.filter(phone_number=phone_number, is_active=True).first()
+		# Check if any active user exists with this phone number
+		users_query = User.objects.filter(phone_number=phone_number, is_active=True)
+		
+		# If role is provided, filter by role
+		if role:
+			users_query = users_query.filter(role=role)
+		
+		user = users_query.first()
 		if not user:
 			return Response({'detail': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -65,6 +76,9 @@ class VerifyOTPView(APIView):
 		serializer.is_valid(raise_exception=True)
 		phone_number = serializer.validated_data['phone_number'].strip()
 		code = serializer.validated_data['code'].strip()
+		
+		# Accept optional role parameter to identify the correct user when multiple exist
+		role = request.data.get('role', '').strip().lower()
 
 		otp = (
 			PhoneOTP.objects.filter(phone_number=phone_number, used_at__isnull=True, expires_at__gt=timezone.now())
@@ -76,7 +90,13 @@ class VerifyOTPView(APIView):
 
 		otp.mark_used()
 
-		user = User.objects.filter(phone_number=phone_number, is_active=True).first()
+		# Find the user - if role is provided, use it to disambiguate
+		users_query = User.objects.filter(phone_number=phone_number, is_active=True)
+		
+		if role:
+			users_query = users_query.filter(role=role)
+		
+		user = users_query.first()
 		if not user:
 			return Response({'detail': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -108,6 +128,10 @@ class StaffViewSet(viewsets.ModelViewSet):
     search_fields = ['phone_number', 'name']
     ordering_fields = ['created_at', 'role']
     
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return CreateUserSerializer
+        return UserSerializer
     
     def get_queryset(self):
         user = self.request.user
@@ -130,6 +154,7 @@ class StaffViewSet(viewsets.ModelViewSet):
         # If not provided, fallback to auto-assigning ALL of manager's storages
         
         storage_ids = self.request.data.get('storage_ids')
+        room_ids = self.request.data.get('room_ids')
         
         if self.request.user.role in ['owner', 'manager']:
             storages_to_assign = []
@@ -162,6 +187,32 @@ class StaffViewSet(viewsets.ModelViewSet):
             elif storage_ids is not None:
                 # If explicit empty list provided, clear assignments
                 new_user.assigned_storages.clear()
+                
+        # Handle room assignment
+        if room_ids is not None and self.request.user.role in ['owner', 'manager']:
+            from apps.inventory.models import StorageRoom
+            
+            # Get rooms that belong to storages accessible to the current user
+            available_storages = self.request.user.assigned_storages.all()
+            if self.request.user.role == 'owner':
+                available_storages = available_storages | self.request.user.owned_cold_storages.all()
+            
+            # Filter rooms by available storages
+            valid_room_ids = []
+            if isinstance(room_ids, list):
+                for rid in room_ids:
+                    try:
+                        valid_room_ids.append(int(rid))
+                    except (ValueError, TypeError):
+                        continue
+            
+            rooms_to_assign = StorageRoom.objects.filter(
+                id__in=valid_room_ids,
+                cold_storage__in=available_storages
+            )
+            
+            if rooms_to_assign.exists():
+                new_user.assigned_rooms.set(rooms_to_assign)
 
     @action(detail=True, methods=['post'], url_path='update-role')
     def update_role(self, request, pk=None):

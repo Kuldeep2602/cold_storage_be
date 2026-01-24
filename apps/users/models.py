@@ -58,7 +58,7 @@ class UserManager(BaseUserManager):
 
 
 class User(AbstractBaseUser, PermissionsMixin):
-	phone_number = models.CharField(max_length=20, unique=True)
+	phone_number = models.CharField(max_length=20, db_index=True)  # Not globally unique
 	name = models.CharField(max_length=255, blank=True)
 	preferred_language = models.CharField(
 		max_length=5,
@@ -72,6 +72,9 @@ class User(AbstractBaseUser, PermissionsMixin):
 	
 	# RBAC: Which cold storages this user can access (for Managers/Operators)
 	assigned_storages = models.ManyToManyField('inventory.ColdStorage', blank=True, related_name='assigned_users')
+	
+	# RBAC: Which storage rooms this user can access (for Operators/Technicians)
+	assigned_rooms = models.ManyToManyField('inventory.StorageRoom', blank=True, related_name='assigned_users')
 
 	is_active = models.BooleanField(default=True)
 	is_staff = models.BooleanField(default=False)
@@ -81,8 +84,19 @@ class User(AbstractBaseUser, PermissionsMixin):
 
 	objects = UserManager()
 
-	USERNAME_FIELD = 'phone_number'
-	REQUIRED_FIELDS: list[str] = []
+	# Use id as USERNAME_FIELD to avoid unique constraint issues
+	# Actual authentication will be done via phone_number + role
+	USERNAME_FIELD = 'id'
+	REQUIRED_FIELDS: list[str] = ['phone_number']
+
+	class Meta:
+		# Phone number must be unique per owner/manager
+		# Owners (managed_by=NULL) have globally unique phone numbers
+		# Staff under different owners can have the same phone number
+		unique_together = [['phone_number', 'managed_by']]
+		indexes = [
+			models.Index(fields=['phone_number', 'role']),
+		]
 
 	def __str__(self) -> str:
 		return f"{self.phone_number} ({self.role})"
