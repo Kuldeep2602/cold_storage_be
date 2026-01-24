@@ -14,9 +14,15 @@ class PersonSerializer(serializers.ModelSerializer):
 
 
 class StorageRoomSerializer(serializers.ModelSerializer):
+    cold_storage_name = serializers.CharField(source='cold_storage.display_name', read_only=True)
+    
     class Meta:
         model = StorageRoom
-        fields = ['id', 'room_name', 'capacity', 'description']
+        fields = [
+            'id', 'cold_storage', 'cold_storage_name', 'room_name', 'capacity', 'description',
+            'min_temperature', 'max_temperature', 'current_temperature', 'last_temp_update'
+        ]
+        read_only_fields = ['id', 'cold_storage_name', 'last_temp_update']
 
 
 class ColdStorageSerializer(serializers.ModelSerializer):
@@ -40,15 +46,17 @@ class ColdStorageSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def get_occupied_capacity(self, obj):
-        """Calculate occupied capacity from inventory"""
+        """Calculate occupied capacity from inventory - OPTIMIZED to prevent N+1 queries"""
+        # Single query for total inward
         total_inward = InwardEntry.objects.filter(cold_storage=obj).aggregate(
             total=Sum('quantity')
         )['total'] or 0
-        
-        total_outward = 0
-        for inward in InwardEntry.objects.filter(cold_storage=obj):
-            total_outward += inward.outward_total_quantity
-        
+
+        # Single query for total outward (instead of looping through inwards)
+        total_outward = OutwardEntry.objects.filter(
+            inward_entry__cold_storage=obj
+        ).aggregate(total=Sum('quantity'))['total'] or 0
+
         return float(total_inward) - float(total_outward)
 
     def get_available_capacity(self, obj):
