@@ -270,6 +270,34 @@ class OutwardEntryViewSet(viewsets.ModelViewSet):
 	permission_classes = [IsOperatorOrHigher]
 	http_method_names = ['get', 'post']
 
+	def get_queryset(self):
+		"""Filter outward entries based on user's accessible cold storages - SECURITY FIX"""
+		user = self.request.user
+		qs = super().get_queryset()
+
+		# Admin sees all
+		if user.role == 'admin':
+			return qs
+
+		# Owner sees all entries from their cold storages
+		if user.role == 'owner':
+			return qs.filter(inward_entry__cold_storage__owner=user)
+
+		# Manager sees entries from their managed cold storages
+		if user.role == 'manager':
+			return qs.filter(inward_entry__cold_storage__manager=user)
+
+		# Operator/Technician sees entries from their assigned cold storages
+		if user.role in ['operator', 'technician']:
+			# Check assigned storages
+			if user.assigned_storages.exists():
+				return qs.filter(inward_entry__cold_storage__in=user.assigned_storages.all())
+			# Fallback: if managed by a manager, show that manager's storage entries
+			if user.managed_by and user.managed_by.role == 'manager':
+				return qs.filter(inward_entry__cold_storage__manager=user.managed_by)
+
+		return qs
+
 	def create(self, request, *args, **kwargs):
 		serializer = self.get_serializer(data=request.data)
 		serializer.is_valid(raise_exception=True)

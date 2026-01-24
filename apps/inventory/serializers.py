@@ -40,15 +40,17 @@ class ColdStorageSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def get_occupied_capacity(self, obj):
-        """Calculate occupied capacity from inventory"""
+        """Calculate occupied capacity from inventory - OPTIMIZED to prevent N+1 queries"""
+        # Single query for total inward
         total_inward = InwardEntry.objects.filter(cold_storage=obj).aggregate(
             total=Sum('quantity')
         )['total'] or 0
-        
-        total_outward = 0
-        for inward in InwardEntry.objects.filter(cold_storage=obj):
-            total_outward += inward.outward_total_quantity
-        
+
+        # Single query for total outward (instead of looping through inwards)
+        total_outward = OutwardEntry.objects.filter(
+            inward_entry__cold_storage=obj
+        ).aggregate(total=Sum('quantity'))['total'] or 0
+
         return float(total_inward) - float(total_outward)
 
     def get_available_capacity(self, obj):
