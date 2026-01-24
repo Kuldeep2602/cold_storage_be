@@ -593,7 +593,7 @@ class StorageRoomViewSet(viewsets.ModelViewSet):
     queryset = StorageRoom.objects.all()
     serializer_class = StorageRoomSerializer
     permission_classes = [IsAuthenticated]
-    http_method_names = ['get', 'patch']
+    http_method_names = ['get', 'post', 'patch']
 
     def get_queryset(self):
         user = self.request.user
