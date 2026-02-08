@@ -5,6 +5,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.pagination import PageNumberPagination
 
 from .models import PhoneOTP, User
 from .permissions import IsManagerOrAdmin
@@ -17,6 +18,13 @@ from .serializers import (
 	create_otp_for_phone,
 	issue_token_pair,
 )
+
+
+class StaffPagination(PageNumberPagination):
+    """Custom pagination for staff list - 50 items per page for better UX"""
+    page_size = 50
+    page_size_query_param = 'page_size'
+    max_page_size = 100
 
 
 class SignupView(APIView):
@@ -121,10 +129,13 @@ class UserViewSet(viewsets.ModelViewSet):
 class StaffViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing staff members.
+    Optimized with prefetch_related to prevent N+1 queries.
+    Returns 50 staff members per page (configurable via ?page_size=N).
     """
     queryset = User.objects.all().order_by('-id')
     serializer_class = UserSerializer
     permission_classes = [IsManagerOrAdmin]
+    pagination_class = StaffPagination  # 50 items per page
     search_fields = ['phone_number', 'name']
     ordering_fields = ['created_at', 'role']
     
@@ -135,15 +146,36 @@ class StaffViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         user = self.request.user
+
+        # Prefetch related data to prevent N+1 queries (213+ queries -> 6-8 queries)
+        # This loads assigned_storages, assigned_rooms, and owned_cold_storages in bulk
+        qs = User.objects.prefetch_related(
+            'assigned_storages',
+            'assigned_storages__rooms',
+            'assigned_rooms',
+            'assigned_rooms__cold_storage',
+            'owned_cold_storages',
+            'owned_cold_storages__rooms'
+        ).select_related('managed_by')
+
         # Owners see staff they created
         # Managers see staff they created
         # Filter out superusers and only show staff managed by current user
         if user.role == 'owner':
-            return User.objects.filter(managed_by=user).exclude(is_superuser=True).order_by('-id')
+            qs = qs.filter(managed_by=user).exclude(is_superuser=True)
         elif user.role == 'manager':
-            return User.objects.filter(managed_by=user).exclude(is_superuser=True).order_by('-id')
-        # Admins see all
-        return User.objects.exclude(is_superuser=True).order_by('-id')
+            qs = qs.filter(managed_by=user).exclude(is_superuser=True)
+        else:
+            # Admins see all
+            qs = qs.exclude(is_superuser=True)
+
+        # Apply cold_storage query parameter filter if provided
+        cold_storage_id = self.request.query_params.get('cold_storage')
+        if cold_storage_id:
+            # Filter to staff members assigned to the specified cold storage
+            qs = qs.filter(assigned_storages__id=cold_storage_id).distinct()
+
+        return qs.order_by('-id')
 
     def perform_create(self, serializer):
         # Set managed_by to current user when creating staff

@@ -141,22 +141,27 @@ class TemperatureAlertViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         queryset = super().get_queryset()
-        
+
         # Filter by user's assigned storages
         if user.role in ['technician', 'operator', 'manager']:
             assigned_storage_ids = user.assigned_storages.values_list('id', flat=True)
             queryset = queryset.filter(room__cold_storage_id__in=assigned_storage_ids)
         elif user.role == 'owner':
             queryset = queryset.filter(room__cold_storage__owner=user)
-        
+
+        # Apply cold_storage query parameter filter if provided
+        cold_storage_id = self.request.query_params.get('cold_storage')
+        if cold_storage_id:
+            queryset = queryset.filter(room__cold_storage_id=cold_storage_id)
+
         status_filter = self.request.query_params.get('status')
         if status_filter:
             queryset = queryset.filter(status=status_filter)
-        
+
         severity_filter = self.request.query_params.get('severity')
         if severity_filter:
             queryset = queryset.filter(severity=severity_filter)
-            
+
         return queryset
 
     @action(detail=False, methods=['get'], url_path='active-count')
