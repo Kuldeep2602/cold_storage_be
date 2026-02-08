@@ -1,10 +1,14 @@
 from decimal import Decimal
 from datetime import timedelta
 
-from django.db.models import Sum, Count, Q, Avg
+from django.db import transaction
+from django.db.models import Sum, Count, Q, Avg, F, Subquery, OuterRef, Value, DecimalField
+from django.db.models.functions import Coalesce
+from django.db.models.deletion import ProtectedError
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -33,22 +37,20 @@ class PersonViewSet(viewsets.ModelViewSet):
 	def get_queryset(self):
 		user = self.request.user
 		qs = super().get_queryset()
-		
+
 		# Filter persons based on user role and hierarchy
+		# Use subqueries instead of materializing staff IDs into Python lists
 		if user.role == 'owner':
 			# Owner sees persons created by them or their staff
-			staff_ids = list(user.staff_members.values_list('id', flat=True))
-			qs = qs.filter(Q(created_by=user) | Q(created_by__in=staff_ids))
+			qs = qs.filter(Q(created_by=user) | Q(created_by__in=user.staff_members.all()))
 		elif user.role == 'manager':
 			# Manager sees persons created by them or their staff
-			staff_ids = list(user.staff_members.values_list('id', flat=True))
-			qs = qs.filter(Q(created_by=user) | Q(created_by__in=staff_ids))
+			qs = qs.filter(Q(created_by=user) | Q(created_by__in=user.staff_members.all()))
 		elif user.role in ['operator', 'technician']:
 			# Operators see persons created by them or their manager's hierarchy
 			if user.managed_by:
 				manager = user.managed_by
-				staff_ids = list(manager.staff_members.values_list('id', flat=True))
-				qs = qs.filter(Q(created_by=user) | Q(created_by=manager) | Q(created_by__in=staff_ids))
+				qs = qs.filter(Q(created_by=user) | Q(created_by=manager) | Q(created_by__in=manager.staff_members.all()))
 			else:
 				qs = qs.filter(created_by=user)
 		
@@ -160,6 +162,17 @@ class ColdStorageViewSet(viewsets.ModelViewSet):
         cold_storage.save()
         return Response(ColdStorageSerializer(cold_storage).data)
 
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        try:
+            self.perform_destroy(instance)
+        except ProtectedError:
+            return Response(
+                {'detail': 'Cannot delete this storage because it has associated inventory entries. Remove all inward/outward entries first.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
 
 class InwardEntryViewSet(viewsets.ModelViewSet):
 	queryset = InwardEntry.objects.select_related('person', 'created_by', 'cold_storage').all().order_by('-id')
@@ -242,11 +255,28 @@ class InwardEntryViewSet(viewsets.ModelViewSet):
 				Q(crop_name__icontains=search)
 			)
 
+		# Annotate remaining quantity in a single query (fixes N+1)
+		outward_totals = OutwardEntry.objects.filter(
+			inward_entry=OuterRef('pk')
+		).values('inward_entry').annotate(
+			total_out=Sum('quantity')
+		).values('total_out')
+
+		qs = qs.annotate(
+			total_outward=Coalesce(
+				Subquery(outward_totals, output_field=DecimalField()),
+				Value(0, output_field=DecimalField())
+			),
+			remaining=F('quantity') - F('total_outward')
+		).filter(remaining__gt=0)
+
+		# Paginate
+		paginator = PageNumberPagination()
+		paginator.page_size = 20
+		page = paginator.paginate_queryset(qs, request)
+
 		results = []
-		for inward in qs:
-			remaining = inward.remaining_quantity
-			if remaining <= 0:
-				continue
+		for inward in page:
 			results.append(
 				{
 					'id': inward.id,
@@ -260,14 +290,14 @@ class InwardEntryViewSet(viewsets.ModelViewSet):
 					'packaging_type': inward.packaging_type,
 					'quality_grade': inward.quality_grade,
 					'quantity': str(inward.quantity),
-					'remaining_quantity': str(remaining),
+					'remaining_quantity': str(inward.remaining),
 					'storage_room': inward.storage_room,
 					'entry_date': str(inward.entry_date) if inward.entry_date else None,
 					'expected_storage_duration_days': inward.expected_storage_duration_days,
 					'created_at': inward.created_at.isoformat() if inward.created_at else None,
 				}
 			)
-		return Response(results)
+		return paginator.get_paginated_response(results)
 
 
 class OutwardEntryViewSet(viewsets.ModelViewSet):
@@ -307,19 +337,29 @@ class OutwardEntryViewSet(viewsets.ModelViewSet):
 	def create(self, request, *args, **kwargs):
 		serializer = self.get_serializer(data=request.data)
 		serializer.is_valid(raise_exception=True)
-		inward = serializer.validated_data['inward_entry']
+		inward_entry_id = serializer.validated_data['inward_entry'].pk
 		qty = serializer.validated_data['quantity']
 		if Decimal(qty) <= 0:
 			return Response({'detail': 'Quantity must be > 0'}, status=status.HTTP_400_BAD_REQUEST)
 
-		remaining = inward.remaining_quantity
-		if qty > remaining:
-			return Response(
-				{'detail': f'Insufficient stock. Remaining: {remaining}'},
-				status=status.HTTP_400_BAD_REQUEST,
-			)
+		with transaction.atomic():
+			# Lock the InwardEntry row to prevent concurrent withdrawals
+			inward = InwardEntry.objects.select_for_update().get(pk=inward_entry_id)
 
-		outward = serializer.save(created_by=request.user)
+			# Recalculate remaining inside the transaction with the row locked
+			outward_total = inward.outward_entries.aggregate(
+				total=Sum('quantity')
+			)['total'] or Decimal('0')
+			remaining = inward.quantity - outward_total
+
+			if qty > remaining:
+				return Response(
+					{'detail': f'Insufficient stock. Remaining: {remaining}'},
+					status=status.HTTP_400_BAD_REQUEST,
+				)
+
+			outward = serializer.save(created_by=request.user)
+
 		return Response(self.get_serializer(outward).data, status=status.HTTP_201_CREATED)
 
 	@action(detail=True, methods=['get'], url_path='receipt')
@@ -360,7 +400,7 @@ class OwnerDashboardView(APIView):
     def get(self, request):
         user = request.user
         cold_storage_id = request.query_params.get('cold_storage')
-        
+
         # Get cold storages owned by user
         if user.role == 'owner':
             cold_storages = ColdStorage.objects.filter(owner=user, is_active=True)
@@ -368,144 +408,33 @@ class OwnerDashboardView(APIView):
             cold_storages = ColdStorage.objects.filter(is_active=True)
         else:
             return Response({'detail': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
-        
+
         # If specific cold storage requested, filter to that one
         if cold_storage_id:
             cold_storages = cold_storages.filter(id=cold_storage_id)
-        
+
         if not cold_storages.exists():
             return Response({
                 'cold_storages': [],
                 'stats': None,
                 'message': 'No cold storages found. Create one to get started.'
             })
-        
+
         # Get list of cold storages for dropdown
         cold_storage_list = ColdStorageSummarySerializer(cold_storages, many=True).data
-        
+
         # Calculate stats for selected cold storage (first one if not specified)
         selected_cs = cold_storages.first()
         if cold_storage_id:
             selected_cs = cold_storages.filter(id=cold_storage_id).first() or selected_cs
-        
-        stats = self._calculate_stats(selected_cs)
-        
+
+        stats = _calculate_dashboard_stats(selected_cs, include_extras=True)
+
         return Response({
             'cold_storages': cold_storage_list,
             'selected_cold_storage': ColdStorageSerializer(selected_cs).data,
             'stats': stats
         })
-
-    def _calculate_stats(self, cold_storage):
-        """Calculate dashboard stats for a cold storage"""
-        from apps.temperature.models import TemperatureAlert, AlertStatus
-
-        now = timezone.now()
-        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-        # Storage utilization
-        total_inward = InwardEntry.objects.filter(cold_storage=cold_storage).aggregate(
-            total=Sum('quantity')
-        )['total'] or Decimal('0')
-
-        # OPTIMIZED: Single query to calculate total outward (was 100+ queries in loop)
-        # Same efficient approach as ColdStorageSerializer
-        total_outward = OutwardEntry.objects.filter(
-            inward_entry__cold_storage=cold_storage
-        ).aggregate(total=Sum('quantity'))['total'] or Decimal('0')
-        
-        occupied = float(total_inward) - float(total_outward)
-        total_capacity = float(cold_storage.total_capacity)
-        available = max(0, total_capacity - occupied)
-        utilization = round((occupied / total_capacity) * 100, 1) if total_capacity > 0 else 0
-        
-        # This month inflow/outflow
-        month_inward = InwardEntry.objects.filter(
-            cold_storage=cold_storage,
-            created_at__gte=month_start
-        ).aggregate(total=Sum('quantity'))['total'] or Decimal('0')
-        
-        month_outward = OutwardEntry.objects.filter(
-            inward_entry__cold_storage=cold_storage,
-            created_at__gte=month_start
-        ).aggregate(total=Sum('quantity'))['total'] or Decimal('0')
-
-        # OPTIMIZED: Count active bookings using database aggregation (was 100+ queries in loop)
-        # Calculate remaining quantity in database using Coalesce to handle NULL values
-        from django.db.models import F, Subquery, OuterRef, Value, DecimalField
-        from django.db.models.functions import Coalesce
-
-        # Subquery to get total outward for each inward entry
-        outward_totals = OutwardEntry.objects.filter(
-            inward_entry=OuterRef('pk')
-        ).values('inward_entry').annotate(
-            total_out=Sum('quantity')
-        ).values('total_out')
-
-        # Count inward entries with remaining stock
-        active_bookings = InwardEntry.objects.filter(
-            cold_storage=cold_storage
-        ).annotate(
-            total_outward=Coalesce(
-                Subquery(outward_totals, output_field=DecimalField()),
-                Value(0, output_field=DecimalField())
-            ),
-            remaining=F('quantity') - F('total_outward')
-        ).filter(remaining__gt=0).count()
-
-        confirmed = active_bookings  # All existing entries are confirmed
-        
-        pending = InwardEntry.objects.filter(
-            cold_storage=cold_storage,
-            created_at__gte=now - timedelta(days=7)
-        ).count()
-        
-        # Temperature alerts
-        # Note: We'd need to link storage rooms to cold storage for accurate alerts
-        active_alerts = TemperatureAlert.objects.filter(
-            status=AlertStatus.ACTIVE
-        ).count()
-        
-        temperature_alerts = TemperatureAlert.objects.filter(
-            status=AlertStatus.ACTIVE
-        ).count()
-        
-        # Avg storage duration
-        avg_duration = InwardEntry.objects.filter(
-            cold_storage=cold_storage,
-            expected_storage_duration_days__isnull=False
-        ).aggregate(avg=Avg('expected_storage_duration_days'))['avg'] or 0
-        
-        # Estimated revenue (mock calculation: quantity * rate)
-        rate_per_mt_per_day = 100  # Rs per MT per day (configurable)
-        estimated_revenue = occupied * avg_duration * rate_per_mt_per_day / 100000  # In Lakhs
-        
-        return {
-            'storage': {
-                'total_capacity': round(total_capacity, 2),
-                'occupied': round(occupied, 2),
-                'available': round(available, 2),
-                'utilization_percent': utilization,
-            },
-            'this_month': {
-                'inflow': float(month_inward),
-                'outflow': float(month_outward),
-            },
-            'bookings': {
-                'active': active_bookings,
-                'confirmed': confirmed,
-                'pending': pending,
-            },
-            'alerts': {
-                'active': active_alerts,
-                'temperature_alerts': temperature_alerts,
-                'equipment_status': 'operational',
-            },
-            'financials': {
-                'estimated_revenue': round(estimated_revenue, 2),
-                'avg_storage_duration': round(avg_duration) if avg_duration else 0,
-            }
-        }
 
 
 class ManagerDashboardView(APIView):
@@ -514,7 +443,7 @@ class ManagerDashboardView(APIView):
 
     def get(self, request):
         user = request.user
-        
+
         # Managers see their assigned cold storages
         if user.role == 'manager':
             cold_storages = ColdStorage.objects.filter(manager=user, is_active=True)
@@ -526,7 +455,7 @@ class ManagerDashboardView(APIView):
             cold_storages = ColdStorage.objects.filter(is_active=True)
         else:
             return Response({'detail': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
-        
+
         if not cold_storages.exists():
             return Response({
                 'cold_storages': [],
@@ -534,98 +463,137 @@ class ManagerDashboardView(APIView):
                 'stats': None,
                 'message': 'No cold storages assigned. Contact your owner.'
             })
-        
+
         # Get list of cold storages for dropdown
         cold_storage_list = ColdStorageSummarySerializer(cold_storages, many=True).data
-        
+
         # Select first cold storage for stats
         selected_cs = cold_storages.first()
         cold_storage_id = request.query_params.get('cold_storage')
         if cold_storage_id:
             selected_cs = cold_storages.filter(id=cold_storage_id).first() or selected_cs
-        
-        stats = self._calculate_stats(selected_cs)
-        
+
+        stats = _calculate_dashboard_stats(selected_cs, include_extras=False)
+
         return Response({
             'cold_storages': cold_storage_list,
             'selected_cold_storage': ColdStorageSerializer(selected_cs).data if selected_cs else None,
             'stats': stats
         })
 
-    def _calculate_stats(self, cold_storage):
-        """Calculate dashboard stats for a cold storage"""
-        if not cold_storage:
-            return None
 
-        now = timezone.now()
-        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+def _calculate_dashboard_stats(cold_storage, include_extras=False):
+    """Shared dashboard stats calculation for both Owner and Manager dashboards.
 
-        # Storage utilization
-        total_inward = InwardEntry.objects.filter(cold_storage=cold_storage).aggregate(
-            total=Sum('quantity')
-        )['total'] or Decimal('0')
+    Args:
+        cold_storage: ColdStorage instance to calculate stats for
+        include_extras: If True, include bookings, alerts, and financials (owner dashboard)
+    """
+    if not cold_storage:
+        return None
 
-        # OPTIMIZED: Single query to calculate total outward (was 100+ queries in loop)
-        # Same efficient approach as ColdStorageSerializer
-        total_outward = OutwardEntry.objects.filter(
-            inward_entry__cold_storage=cold_storage
-        ).aggregate(total=Sum('quantity'))['total'] or Decimal('0')
-        
-        occupied = float(total_inward) - float(total_outward)
-        total_capacity = float(cold_storage.total_capacity)
-        available = max(0, total_capacity - occupied)
-        utilization = round((occupied / total_capacity) * 100, 1) if total_capacity > 0 else 0
-        
-        # This month inflow/outflow
-        month_inward = InwardEntry.objects.filter(
+    from apps.temperature.models import TemperatureAlert, AlertStatus
+
+    now = timezone.now()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    # Storage utilization
+    total_inward = InwardEntry.objects.filter(cold_storage=cold_storage).aggregate(
+        total=Sum('quantity')
+    )['total'] or Decimal('0')
+
+    total_outward = OutwardEntry.objects.filter(
+        inward_entry__cold_storage=cold_storage
+    ).aggregate(total=Sum('quantity'))['total'] or Decimal('0')
+
+    occupied = float(total_inward) - float(total_outward)
+    total_capacity = float(cold_storage.total_capacity)
+    available = max(0, total_capacity - occupied)
+    utilization = round((occupied / total_capacity) * 100, 1) if total_capacity > 0 else 0
+
+    # This month inflow/outflow
+    month_inward = InwardEntry.objects.filter(
+        cold_storage=cold_storage,
+        created_at__gte=month_start
+    ).aggregate(total=Sum('quantity'))['total'] or Decimal('0')
+
+    month_outward = OutwardEntry.objects.filter(
+        inward_entry__cold_storage=cold_storage,
+        created_at__gte=month_start
+    ).aggregate(total=Sum('quantity'))['total'] or Decimal('0')
+
+    # Subquery to get total outward for each inward entry
+    outward_totals = OutwardEntry.objects.filter(
+        inward_entry=OuterRef('pk')
+    ).values('inward_entry').annotate(
+        total_out=Sum('quantity')
+    ).values('total_out')
+
+    # Count inward entries with remaining stock
+    active_bookings = InwardEntry.objects.filter(
+        cold_storage=cold_storage
+    ).annotate(
+        total_outward=Coalesce(
+            Subquery(outward_totals, output_field=DecimalField()),
+            Value(0, output_field=DecimalField())
+        ),
+        remaining_qty=F('quantity') - F('total_outward')
+    ).filter(remaining_qty__gt=0).count()
+
+    stats = {
+        'storage': {
+            'total_capacity': round(total_capacity, 2),
+            'occupied': round(occupied, 2),
+            'available': round(available, 2),
+            'utilization_percent': utilization,
+        },
+        'this_month': {
+            'inflow': float(month_inward),
+            'outflow': float(month_outward),
+        },
+        'active_bookings': active_bookings,
+    }
+
+    if include_extras:
+        pending = InwardEntry.objects.filter(
             cold_storage=cold_storage,
-            created_at__gte=month_start
-        ).aggregate(total=Sum('quantity'))['total'] or Decimal('0')
-        
-        month_outward = OutwardEntry.objects.filter(
-            inward_entry__cold_storage=cold_storage,
-            created_at__gte=month_start
-        ).aggregate(total=Sum('quantity'))['total'] or Decimal('0')
+            created_at__gte=now - timedelta(days=7)
+        ).count()
 
-        # OPTIMIZED: Count active bookings using database aggregation (was 100+ queries in loop)
-        from django.db.models import F, Subquery, OuterRef, Value, DecimalField
-        from django.db.models.functions import Coalesce
+        # Temperature alerts scoped to this cold storage's rooms
+        active_alerts = TemperatureAlert.objects.filter(
+            room__cold_storage=cold_storage,
+            status=AlertStatus.ACTIVE
+        ).count()
 
-        # Subquery to get total outward for each inward entry
-        outward_totals = OutwardEntry.objects.filter(
-            inward_entry=OuterRef('pk')
-        ).values('inward_entry').annotate(
-            total_out=Sum('quantity')
-        ).values('total_out')
+        avg_duration = InwardEntry.objects.filter(
+            cold_storage=cold_storage,
+            expected_storage_duration_days__isnull=False
+        ).aggregate(avg=Avg('expected_storage_duration_days'))['avg'] or 0
 
-        # Count inward entries with remaining stock
-        active_bookings = InwardEntry.objects.filter(
-            cold_storage=cold_storage
-        ).annotate(
-            total_outward=Coalesce(
-                Subquery(outward_totals, output_field=DecimalField()),
-                Value(0, output_field=DecimalField())
-            ),
-            remaining=F('quantity') - F('total_outward')
-        ).filter(remaining__gt=0).count()
-        
-        return {
-            'storage': {
-                'total_capacity': round(total_capacity, 2),
-                'occupied': round(occupied, 2),
-                'available': round(available, 2),
-                'utilization_percent': utilization,
-            },
-            'this_month': {
-                'inflow': float(month_inward),
-                'outflow': float(month_outward),
-            },
-            'active_bookings': active_bookings,
+        rate_per_mt_per_day = 100
+        estimated_revenue = occupied * avg_duration * rate_per_mt_per_day / 100000
+
+        stats['bookings'] = {
+            'active': active_bookings,
+            'confirmed': active_bookings,
+            'pending': pending,
         }
+        stats['alerts'] = {
+            'active': active_alerts,
+            'temperature_alerts': active_alerts,
+            'equipment_status': 'operational',
+        }
+        stats['financials'] = {
+            'estimated_revenue': round(estimated_revenue, 2),
+            'avg_storage_duration': round(avg_duration) if avg_duration else 0,
+        }
+
+    return stats
 
 
 class StorageRoomViewSet(viewsets.ModelViewSet):
-    queryset = StorageRoom.objects.all()
+    queryset = StorageRoom.objects.select_related('cold_storage').all()
     serializer_class = StorageRoomSerializer
     permission_classes = [IsAuthenticated]
     http_method_names = ['get', 'post', 'patch']

@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from django.db import transaction
 from django.db.models import Sum
 
 from .models import ColdStorage, InwardEntry, OutwardEntry, Person, StorageRoom
@@ -134,12 +135,13 @@ class ColdStorageCreateSerializer(serializers.ModelSerializer):
             validated_data['is_active'] = True
         initial_rooms = validated_data.pop('initial_rooms', [])
 
-        instance = super().create(validated_data)
+        with transaction.atomic():
+            instance = super().create(validated_data)
 
-        # Create initial rooms
-        if initial_rooms:
-            rooms = [StorageRoom(cold_storage=instance, room_name=name.strip()) for name in initial_rooms if name.strip()]
-            StorageRoom.objects.bulk_create(rooms)
+            # Create initial rooms
+            if initial_rooms:
+                rooms = [StorageRoom(cold_storage=instance, room_name=name.strip()) for name in initial_rooms if name.strip()]
+                StorageRoom.objects.bulk_create(rooms)
 
         return instance
 

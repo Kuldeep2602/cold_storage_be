@@ -15,7 +15,7 @@ from .serializers import (
 
 
 class TemperatureLogViewSet(viewsets.ModelViewSet):
-    queryset = TemperatureLog.objects.all()
+    queryset = TemperatureLog.objects.select_related('room', 'room__cold_storage', 'created_by').all()
     serializer_class = TemperatureLogSerializer
     permission_classes = [IsAuthenticated]
     http_method_names = ['get', 'post']
@@ -61,7 +61,7 @@ class TemperatureLogViewSet(viewsets.ModelViewSet):
         
         # Get room and verify access
         try:
-            room = StorageRoom.objects.get(id=room_id)
+            room = StorageRoom.objects.select_related('cold_storage', 'cold_storage__owner').get(id=room_id)
             
             # Verify user has access to this room's cold storage
             user = request.user
@@ -133,7 +133,7 @@ class TemperatureLogViewSet(viewsets.ModelViewSet):
 
 
 class TemperatureAlertViewSet(viewsets.ModelViewSet):
-    queryset = TemperatureAlert.objects.all()
+    queryset = TemperatureAlert.objects.select_related('room', 'room__cold_storage', 'acknowledged_by').all()
     serializer_class = TemperatureAlertSerializer
     permission_classes = [IsAuthenticated]
     http_method_names = ['get', 'post', 'patch']

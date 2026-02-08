@@ -1,9 +1,11 @@
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 from rest_framework.pagination import PageNumberPagination
 
@@ -30,6 +32,8 @@ class StaffPagination(PageNumberPagination):
 class SignupView(APIView):
 	"""Register a new user with phone number and send OTP"""
 	permission_classes = [AllowAny]
+	throttle_classes = [ScopedRateThrottle]
+	throttle_scope = 'signup'
 
 	def post(self, request):
 		serializer = SignupSerializer(data=request.data)
@@ -47,6 +51,8 @@ class SignupView(APIView):
 
 class RequestOTPView(APIView):
 	permission_classes = [AllowAny]
+	throttle_classes = [ScopedRateThrottle]
+	throttle_scope = 'otp_request'
 
 	def post(self, request):
 		serializer = OTPRequestSerializer(data=request.data)
@@ -78,6 +84,8 @@ class RequestOTPView(APIView):
 
 class VerifyOTPView(APIView):
 	permission_classes = [AllowAny]
+	throttle_classes = [ScopedRateThrottle]
+	throttle_scope = 'otp_verify'
 
 	def post(self, request):
 		serializer = OTPVerifySerializer(data=request.data)
@@ -178,73 +186,74 @@ class StaffViewSet(viewsets.ModelViewSet):
         return qs.order_by('-id')
 
     def perform_create(self, serializer):
-        # Set managed_by to current user when creating staff
-        new_user = serializer.save(managed_by=self.request.user)
-        
-        # Handle storage assignment
-        # If 'storage_ids' provided, use those (filtered by permission)
-        # If not provided, fallback to auto-assigning ALL of manager's storages
-        
-        storage_ids = self.request.data.get('storage_ids')
-        room_ids = self.request.data.get('room_ids')
-        
-        if self.request.user.role in ['owner', 'manager']:
-            storages_to_assign = []
-            
-            # Get valid scope for the current user
-            available_storages = self.request.user.assigned_storages.all()
-            if self.request.user.role == 'owner':
-                # Owner can assign any of their owned storages
-                # (Note: owned_cold_storages contains all storages owned by user)
-                 available_storages = available_storages | self.request.user.owned_cold_storages.all()
-            
-            if storage_ids is not None:
-                # Filter requested IDs against available scope
-                # Ensure we only pick IDs that are integers (handling potential bad input)
-                valid_ids = []
-                if isinstance(storage_ids, list):
-                    for sid in storage_ids:
-                         try:
-                             valid_ids.append(int(sid))
-                         except (ValueError, TypeError):
-                             continue
-                
-                storages_to_assign = available_storages.filter(id__in=valid_ids)
-            else:
-                # Default: Assign ALL if storage_ids param is missing entirely
-                storages_to_assign = available_storages
+        with transaction.atomic():
+            # Set managed_by to current user when creating staff
+            new_user = serializer.save(managed_by=self.request.user)
 
-            if storages_to_assign.exists():
-                new_user.assigned_storages.set(storages_to_assign)
-            elif storage_ids is not None:
-                # If explicit empty list provided, clear assignments
-                new_user.assigned_storages.clear()
-                
-        # Handle room assignment
-        if room_ids is not None and self.request.user.role in ['owner', 'manager']:
-            from apps.inventory.models import StorageRoom
-            
-            # Get rooms that belong to storages accessible to the current user
-            available_storages = self.request.user.assigned_storages.all()
-            if self.request.user.role == 'owner':
-                available_storages = available_storages | self.request.user.owned_cold_storages.all()
-            
-            # Filter rooms by available storages
-            valid_room_ids = []
-            if isinstance(room_ids, list):
-                for rid in room_ids:
-                    try:
-                        valid_room_ids.append(int(rid))
-                    except (ValueError, TypeError):
-                        continue
-            
-            rooms_to_assign = StorageRoom.objects.filter(
-                id__in=valid_room_ids,
-                cold_storage__in=available_storages
-            )
-            
-            if rooms_to_assign.exists():
-                new_user.assigned_rooms.set(rooms_to_assign)
+            # Handle storage assignment
+            # If 'storage_ids' provided, use those (filtered by permission)
+            # If not provided, fallback to auto-assigning ALL of manager's storages
+
+            storage_ids = self.request.data.get('storage_ids')
+            room_ids = self.request.data.get('room_ids')
+
+            if self.request.user.role in ['owner', 'manager']:
+                storages_to_assign = []
+
+                # Get valid scope for the current user
+                available_storages = self.request.user.assigned_storages.all()
+                if self.request.user.role == 'owner':
+                    # Owner can assign any of their owned storages
+                    # (Note: owned_cold_storages contains all storages owned by user)
+                     available_storages = available_storages | self.request.user.owned_cold_storages.all()
+
+                if storage_ids is not None:
+                    # Filter requested IDs against available scope
+                    # Ensure we only pick IDs that are integers (handling potential bad input)
+                    valid_ids = []
+                    if isinstance(storage_ids, list):
+                        for sid in storage_ids:
+                             try:
+                                 valid_ids.append(int(sid))
+                             except (ValueError, TypeError):
+                                 continue
+
+                    storages_to_assign = available_storages.filter(id__in=valid_ids)
+                else:
+                    # Default: Assign ALL if storage_ids param is missing entirely
+                    storages_to_assign = available_storages
+
+                if storages_to_assign.exists():
+                    new_user.assigned_storages.set(storages_to_assign)
+                elif storage_ids is not None:
+                    # If explicit empty list provided, clear assignments
+                    new_user.assigned_storages.clear()
+
+            # Handle room assignment
+            if room_ids is not None and self.request.user.role in ['owner', 'manager']:
+                from apps.inventory.models import StorageRoom
+
+                # Get rooms that belong to storages accessible to the current user
+                available_storages = self.request.user.assigned_storages.all()
+                if self.request.user.role == 'owner':
+                    available_storages = available_storages | self.request.user.owned_cold_storages.all()
+
+                # Filter rooms by available storages
+                valid_room_ids = []
+                if isinstance(room_ids, list):
+                    for rid in room_ids:
+                        try:
+                            valid_room_ids.append(int(rid))
+                        except (ValueError, TypeError):
+                            continue
+
+                rooms_to_assign = StorageRoom.objects.filter(
+                    id__in=valid_room_ids,
+                    cold_storage__in=available_storages
+                )
+
+                if rooms_to_assign.exists():
+                    new_user.assigned_rooms.set(rooms_to_assign)
 
     @action(detail=True, methods=['post'], url_path='update-role')
     def update_role(self, request, pk=None):

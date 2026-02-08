@@ -66,6 +66,10 @@ class ColdStorage(models.Model):
         verbose_name_plural = 'Storages'
         # Code must be unique per owner, not globally
         unique_together = [['owner', 'code']]
+        indexes = [
+            models.Index(fields=['owner', 'is_active']),
+            models.Index(fields=['manager', 'is_active']),
+        ]
 
     def __str__(self) -> str:
         return f"{self.name} ({self.code})"
@@ -194,6 +198,11 @@ class Person(models.Model):
 	created_at = models.DateTimeField(auto_now_add=True)
 	updated_at = models.DateTimeField(auto_now=True)
 
+	class Meta:
+		indexes = [
+			models.Index(fields=['created_by']),
+		]
+
 	def __str__(self) -> str:
 		return f"{self.name} ({self.mobile_number})"
 
@@ -223,6 +232,13 @@ class InwardEntry(models.Model):
 
 	created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='created_inwards')
 	created_at = models.DateTimeField(auto_now_add=True)
+
+	class Meta:
+		indexes = [
+			models.Index(fields=['cold_storage', 'created_at']),
+			models.Index(fields=['person', 'crop_name']),
+			models.Index(fields=['created_by']),
+		]
 
 	def __str__(self) -> str:
 		return f"Inward {self.id} - {self.crop_name} - {self.quantity}"

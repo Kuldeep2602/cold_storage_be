@@ -1,6 +1,8 @@
 from decimal import Decimal
 
+from django.db.models import Sum
 from django.utils.dateparse import parse_datetime
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -40,12 +42,14 @@ class LedgerView(APIView):
 				inwards = inwards.filter(created_at__lte=dt)
 				outwards = outwards.filter(created_at__lte=dt)
 
+		# Compute totals at the database level instead of Python loops
+		inward_total = inwards.aggregate(total=Sum('quantity'))['total'] or Decimal('0')
+		outward_total = outwards.aggregate(total=Sum('quantity'))['total'] or Decimal('0')
+
+		# Build entries list with pagination
 		entries = []
-		inward_total = Decimal('0')
-		outward_total = Decimal('0')
 
 		for i in inwards.order_by('created_at'):
-			inward_total += i.quantity
 			entries.append(
 				{
 					'type': 'inward',
@@ -60,7 +64,6 @@ class LedgerView(APIView):
 			)
 
 		for o in outwards.order_by('created_at'):
-			outward_total += o.quantity
 			i = o.inward_entry
 			p = i.person
 			entries.append(
@@ -81,6 +84,17 @@ class LedgerView(APIView):
 
 		entries.sort(key=lambda e: e['timestamp'])
 
+		# Paginate entries
+		page_size = 50
+		try:
+			page_num = int(qp.get('page', 1))
+		except (ValueError, TypeError):
+			page_num = 1
+		start = (page_num - 1) * page_size
+		end = start + page_size
+		total_count = len(entries)
+		page_entries = entries[start:end]
+
 		return Response(
 			{
 				'filters': {'date_from': date_from, 'date_to': date_to, 'person': person_id, 'crop': crop},
@@ -89,6 +103,9 @@ class LedgerView(APIView):
 					'outward_quantity_total': outward_total,
 					'net_quantity': inward_total - outward_total,
 				},
-				'entries': entries,
+				'count': total_count,
+				'page': page_num,
+				'page_size': page_size,
+				'entries': page_entries,
 			}
 		)

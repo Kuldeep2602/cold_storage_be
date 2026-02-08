@@ -40,6 +40,10 @@ class TemperatureAlert(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['room', 'status']),
+            models.Index(fields=['status']),
+        ]
 
     def __str__(self) -> str:
         return f"Alert: {self.room.room_name} - {self.temperature}°C ({self.severity})"
@@ -69,6 +73,9 @@ class TemperatureLog(models.Model):
 
     class Meta:
         ordering = ['-logged_at']
+        indexes = [
+            models.Index(fields=['room', '-logged_at']),
+        ]
 
     def __str__(self) -> str:
         return f"{self.room.room_name} - {self.logged_at}: {self.temperature}°C"
