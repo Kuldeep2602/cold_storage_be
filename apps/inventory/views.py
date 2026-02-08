@@ -399,18 +399,20 @@ class OwnerDashboardView(APIView):
     def _calculate_stats(self, cold_storage):
         """Calculate dashboard stats for a cold storage"""
         from apps.temperature.models import TemperatureAlert, AlertStatus
-        
+
         now = timezone.now()
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        
+
         # Storage utilization
         total_inward = InwardEntry.objects.filter(cold_storage=cold_storage).aggregate(
             total=Sum('quantity')
         )['total'] or Decimal('0')
-        
-        total_outward = Decimal('0')
-        for inward in InwardEntry.objects.filter(cold_storage=cold_storage):
-            total_outward += Decimal(str(inward.outward_total_quantity))
+
+        # OPTIMIZED: Single query to calculate total outward (was 100+ queries in loop)
+        # Same efficient approach as ColdStorageSerializer
+        total_outward = OutwardEntry.objects.filter(
+            inward_entry__cold_storage=cold_storage
+        ).aggregate(total=Sum('quantity'))['total'] or Decimal('0')
         
         occupied = float(total_inward) - float(total_outward)
         total_capacity = float(cold_storage.total_capacity)
@@ -427,15 +429,31 @@ class OwnerDashboardView(APIView):
             inward_entry__cold_storage=cold_storage,
             created_at__gte=month_start
         ).aggregate(total=Sum('quantity'))['total'] or Decimal('0')
-        
-        # Active bookings (current inventory entries with stock remaining)
-        active_inwards = InwardEntry.objects.filter(cold_storage=cold_storage)
-        active_bookings = 0
-        confirmed = 0
-        for inward in active_inwards:
-            if inward.remaining_quantity > 0:
-                active_bookings += 1
-                confirmed += 1  # All existing entries are confirmed
+
+        # OPTIMIZED: Count active bookings using database aggregation (was 100+ queries in loop)
+        # Calculate remaining quantity in database using Coalesce to handle NULL values
+        from django.db.models import F, Subquery, OuterRef, Value, DecimalField
+        from django.db.models.functions import Coalesce
+
+        # Subquery to get total outward for each inward entry
+        outward_totals = OutwardEntry.objects.filter(
+            inward_entry=OuterRef('pk')
+        ).values('inward_entry').annotate(
+            total_out=Sum('quantity')
+        ).values('total_out')
+
+        # Count inward entries with remaining stock
+        active_bookings = InwardEntry.objects.filter(
+            cold_storage=cold_storage
+        ).annotate(
+            total_outward=Coalesce(
+                Subquery(outward_totals, output_field=DecimalField()),
+                Value(0, output_field=DecimalField())
+            ),
+            remaining=F('quantity') - F('total_outward')
+        ).filter(remaining__gt=0).count()
+
+        confirmed = active_bookings  # All existing entries are confirmed
         
         pending = InwardEntry.objects.filter(
             cold_storage=cold_storage,
@@ -538,18 +556,20 @@ class ManagerDashboardView(APIView):
         """Calculate dashboard stats for a cold storage"""
         if not cold_storage:
             return None
-            
+
         now = timezone.now()
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        
+
         # Storage utilization
         total_inward = InwardEntry.objects.filter(cold_storage=cold_storage).aggregate(
             total=Sum('quantity')
         )['total'] or Decimal('0')
-        
-        total_outward = Decimal('0')
-        for inward in InwardEntry.objects.filter(cold_storage=cold_storage):
-            total_outward += Decimal(str(inward.outward_total_quantity))
+
+        # OPTIMIZED: Single query to calculate total outward (was 100+ queries in loop)
+        # Same efficient approach as ColdStorageSerializer
+        total_outward = OutwardEntry.objects.filter(
+            inward_entry__cold_storage=cold_storage
+        ).aggregate(total=Sum('quantity'))['total'] or Decimal('0')
         
         occupied = float(total_inward) - float(total_outward)
         total_capacity = float(cold_storage.total_capacity)
@@ -566,13 +586,28 @@ class ManagerDashboardView(APIView):
             inward_entry__cold_storage=cold_storage,
             created_at__gte=month_start
         ).aggregate(total=Sum('quantity'))['total'] or Decimal('0')
-        
-        # Active bookings (current inventory entries with stock remaining)
-        active_inwards = InwardEntry.objects.filter(cold_storage=cold_storage)
-        active_bookings = 0
-        for inward in active_inwards:
-            if inward.remaining_quantity > 0:
-                active_bookings += 1
+
+        # OPTIMIZED: Count active bookings using database aggregation (was 100+ queries in loop)
+        from django.db.models import F, Subquery, OuterRef, Value, DecimalField
+        from django.db.models.functions import Coalesce
+
+        # Subquery to get total outward for each inward entry
+        outward_totals = OutwardEntry.objects.filter(
+            inward_entry=OuterRef('pk')
+        ).values('inward_entry').annotate(
+            total_out=Sum('quantity')
+        ).values('total_out')
+
+        # Count inward entries with remaining stock
+        active_bookings = InwardEntry.objects.filter(
+            cold_storage=cold_storage
+        ).annotate(
+            total_outward=Coalesce(
+                Subquery(outward_totals, output_field=DecimalField()),
+                Value(0, output_field=DecimalField())
+            ),
+            remaining=F('quantity') - F('total_outward')
+        ).filter(remaining__gt=0).count()
         
         return {
             'storage': {
@@ -598,13 +633,18 @@ class StorageRoomViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         qs = super().get_queryset()
-        
+
         # Filter rooms based on user's assigned storages
         if user.role in ['technician', 'operator', 'manager']:
             assigned_storage_ids = user.assigned_storages.values_list('id', flat=True)
             qs = qs.filter(cold_storage_id__in=assigned_storage_ids)
         elif user.role == 'owner':
             qs = qs.filter(cold_storage__owner=user)
-        
+
+        # Apply cold_storage query parameter filter if provided
+        cold_storage_id = self.request.query_params.get('cold_storage')
+        if cold_storage_id:
+            qs = qs.filter(cold_storage_id=cold_storage_id)
+
         return qs
 

@@ -72,23 +72,45 @@ class ColdStorageSerializer(serializers.ModelSerializer):
 
 class ColdStorageCreateSerializer(serializers.ModelSerializer):
     initial_rooms = serializers.ListField(child=serializers.CharField(), required=False, write_only=True)
+    owner_name = serializers.CharField(source='owner.name', read_only=True)
+    manager_name = serializers.CharField(source='manager.name', read_only=True, allow_null=True)
+    display_name = serializers.CharField(read_only=True)
+    occupied_capacity = serializers.SerializerMethodField()
+    available_capacity = serializers.SerializerMethodField()
+    utilization_percent = serializers.SerializerMethodField()
 
     class Meta:
         model = ColdStorage
-        fields = ['name', 'code', 'storage_type', 'address', 'city', 'state', 'total_capacity', 
-                  'manager', 'contact_phone', 'contact_email', 'initial_rooms']
+        fields = ['id', 'name', 'code', 'storage_type', 'display_name', 'address', 'city', 'state', 'total_capacity',
+                  'owner', 'owner_name', 'manager', 'manager_name',
+                  'contact_phone', 'contact_email', 'is_active',
+                  'occupied_capacity', 'available_capacity', 'utilization_percent',
+                  'created_at', 'updated_at', 'initial_rooms']
+        read_only_fields = ['id', 'owner', 'created_at', 'updated_at']
+
+    def get_occupied_capacity(self, obj):
+        return obj.occupied_capacity
+
+    def get_available_capacity(self, obj):
+        return obj.available_capacity
+
+    def get_utilization_percent(self, obj):
+        return obj.utilization_percent
 
     def create(self, validated_data):
         validated_data['owner'] = self.context['request'].user
+        # Ensure new storages are active by default
+        if 'is_active' not in validated_data:
+            validated_data['is_active'] = True
         initial_rooms = validated_data.pop('initial_rooms', [])
-        
+
         instance = super().create(validated_data)
-        
+
         # Create initial rooms
         if initial_rooms:
             rooms = [StorageRoom(cold_storage=instance, room_name=name.strip()) for name in initial_rooms if name.strip()]
             StorageRoom.objects.bulk_create(rooms)
-            
+
         return instance
 
 
