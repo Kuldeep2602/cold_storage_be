@@ -45,6 +45,23 @@ class ColdStorageSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
+    def validate(self, attrs):
+        """Validate unique_together constraint for (owner, code) during update"""
+        code = attrs.get('code')
+
+        # Only validate if code is being changed
+        if code and self.instance:
+            # Check if another cold storage owned by the same owner has this code
+            if ColdStorage.objects.filter(
+                owner=self.instance.owner,
+                code=code
+            ).exclude(id=self.instance.id).exists():
+                raise serializers.ValidationError({
+                    'code': f'You already have a cold storage with code "{code}". Please use a different code.'
+                })
+
+        return attrs
+
     def get_occupied_capacity(self, obj):
         """Calculate occupied capacity from inventory - OPTIMIZED to prevent N+1 queries"""
         # Single query for total inward
@@ -96,6 +113,19 @@ class ColdStorageCreateSerializer(serializers.ModelSerializer):
 
     def get_utilization_percent(self, obj):
         return obj.utilization_percent
+
+    def validate(self, attrs):
+        """Validate unique_together constraint for (owner, code)"""
+        user = self.context['request'].user
+        code = attrs.get('code')
+
+        # Check if this owner already has a cold storage with this code
+        if code and ColdStorage.objects.filter(owner=user, code=code).exists():
+            raise serializers.ValidationError({
+                'code': f'You already have a cold storage with code "{code}". Please use a different code.'
+            })
+
+        return attrs
 
     def create(self, validated_data):
         validated_data['owner'] = self.context['request'].user
